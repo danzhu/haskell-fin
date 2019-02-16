@@ -1,0 +1,34 @@
+name: fin
+version: 0.1.0.0
+synopsis: Fin compiler
+description: Please see README.md
+author: Daniel Zhu <danzhu24@hotmail.com>
+maintainer: Daniel Zhu <danzhu24@hotmail.com>
+
+extra-source-files:
+  - README.md
+
+dependencies:
+  - base >= 4.7 && < 5
+
+ghc-options: -Wall
+
+library:
+  source-dirs:
+    - src
+  exposed-modules:
+    - Compiler
+  dependencies:
+    - containers
+    - file-embed
+    - megaparsec
+    - mtl
+    - parser-combinators
+
+executables:
+  fc:
+    main: Main.hs
+    source-dirs:
+      - app
+    dependencies:
+      - fin

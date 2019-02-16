@@ -1,0 +1,12 @@
+let twice = |f| |a| f (f a)
+let add1 = add 1
+def id = |a| a
+def fib n = n .if (n .lt 2) id {
+    || (fib (n .sub 1)) .add (fib (n .sub 2))
+}
+println (twice add1 2)
+println {
+    let n = 10
+    fib n
+}
+println "hello world"
