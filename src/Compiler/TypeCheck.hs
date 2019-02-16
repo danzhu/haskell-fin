@@ -18,7 +18,6 @@ import           Data.Functor.Identity (runIdentity)
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import           Data.Traversable (for)
-import           Debug.Trace
 
 data TypeError = TypeErr SrcPos TypeErrorKind
 data TypeErrorKind = UnboundVar Var
@@ -43,7 +42,7 @@ newtype Subst = Subst (Map.Map TypeVar Type)
               deriving (Show)
 
 instance Semigroup Subst where
-  Subst a <> Subst b = Subst $ b `Map.union` Map.map (subst $ Subst b) a
+  Subst a <> subs@(Subst b) = Subst $ b `Map.union` Map.map (subst subs) a
 
 instance Monoid Subst where
   mempty = Subst Map.empty
@@ -70,12 +69,18 @@ instance (Substitutable a) => Substitutable [a] where
 freshVar :: Infer Type
 freshVar = do
   (vs, i) <- RWS.get
-  let var = TypeVar $ "_t" ++ show i
+  let var = TypeVar $ 't' : show i
   RWS.put (Set.insert var vs, i + 1)
   pure $ TVar $ var
 
 usedVars :: Infer (Set.Set TypeVar)
 usedVars = RWS.gets fst
+
+withVar :: Var -> Scheme -> Infer a -> Infer a
+withVar var scm = RWS.local $ Map.insert var scm
+
+withVars :: [(Var, Scheme)] -> Infer a -> Infer a
+withVars vars = RWS.local $ Map.union $ Map.fromList vars
 
 freeVars :: Type -> Set.Set TypeVar
 freeVars tp = case tp of
@@ -93,9 +98,14 @@ instantiate (Forall cns tvs tp) = do
   RWS.tell $ subst subs cns
   pure $ subst subs tp
 
-generalize :: [Constraint] -> Set.Set TypeVar -> Type -> Scheme
-generalize cns tvs tp = do
-  traceShow ("generalize", cns, tvs, tp) $ Forall cns tvs tp
+generalize :: Infer (Node a) -> Infer (Node a, Scheme)
+generalize inf = do
+  old <- usedVars
+  (a@Node { nType = tp }, cns) <- RWS.listen inf
+  new <- usedVars
+  let tvs = new Set.\\ old
+      scm = Forall cns tvs tp
+  pure (a, scm)
 
 patVars :: Pat -> [(Var, Type)]
 patVars Node{ nType = tp, nKind = kind } = case kind of
@@ -135,8 +145,8 @@ instance Typeable Expr where
         tRet <- freshVar
         arms' <- for arms $ \(Arm pat expr) -> do
           pat'@Node{ nType = tPat } <- constraint pat
-          let env = Map.union $ Map.fromList . map (uncurry toScm) $ patVars pat'
-          expr'@Node{ nType = tExpr } <- RWS.local env $ constraint expr
+          let vars = map (uncurry toScm) $ patVars pat'
+          expr'@Node{ nType = tExpr } <- withVars vars $ constraint expr
           RWS.tell [ Constraint pos tArg tPat
                    , Constraint pos tRet tExpr ]
           pure $ Arm pat' expr'
@@ -146,26 +156,17 @@ instance Typeable Expr where
         b'@Node { nType = tB } <- constraint b
         pure (tB, ESeq a' b')
       ELet var val expr -> do
-        old <- usedVars
-        (val'@Node { nType = tVal }, cns) <- RWS.listen $ constraint val
-        new <- usedVars
-        let scm = generalize cns (new Set.\\ old) tVal
-            env = Map.insert var scm
-        expr'@Node{ nType = tExpr } <- RWS.local env $ constraint expr
+        (val', scm) <- generalize $ constraint val
+        expr'@Node{ nType = tExpr } <- withVar var scm $ constraint expr
         pure (tExpr, ELet var val' expr')
       EDef var val expr -> do
-        old <- usedVars
-        tp <- freshVar
-        let scm = Forall [] Set.empty tp
-            env = Map.insert var scm
-        (val', cns) <- RWS.listen $ do
-          val'@Node{ nType = tVal } <- RWS.local env $ constraint val
+        (val', scm) <- generalize $ do
+          tp <- freshVar
+          let scm = Forall [] Set.empty tp
+          val'@Node{ nType = tVal } <- withVar var scm $ constraint val
           RWS.tell [ Constraint pos tp tVal ]
           pure val'
-        new <- usedVars
-        let scm' = generalize cns (new Set.\\ old) tp
-            env' = Map.insert var scm'
-        expr'@Node { nType = tExpr } <- RWS.local env' $ constraint expr
+        expr'@Node { nType = tExpr } <- withVar var scm $ constraint expr
         pure (tExpr, EDef var val' expr')
     pure $ node{ nType = tp, nKind = kind' }
     where toScm v tp = (v, Forall [] Set.empty tp)
@@ -189,7 +190,6 @@ unify pos t1 t2 = throwError $ TypeErr pos $ UnifyError t1 t2
 unifies :: [Constraint] -> Either TypeError Subst
 unifies [] = pure mempty
 unifies (Constraint pos a b : cs) = do
-  traceShowM ("unify", a, b)
   subs <- unify pos a b
   rest <- unifies $ subst subs cs
   pure $ subs <> rest
@@ -197,10 +197,7 @@ unifies (Constraint pos a b : cs) = do
 infer :: Context -> Ast -> Either TypeError Ast
 infer ctx ast = do
   (ast', cns) <- RWS.evalRWST (constraint ast) ctx (Set.empty, 0)
-  traceShowM ast'
-  traceShowM cns
   subs <- unifies cns
-  traceShowM subs
   pure $ subst subs ast'
 
 context :: Context
@@ -212,7 +209,7 @@ context = Map.fromList $ map (first Var) ctx
               , ("println", poly ["a"] $ fun [a] nil)]
         mono = Forall [] Set.empty
         poly = Forall [] . Set.fromList . map TypeVar
-        fun ts ret = foldr TFun ret ts
+        fun = flip $ foldr TFun
         a = TVar $ TypeVar "a"
         nil = TNat NNil
         int = TNat NInt

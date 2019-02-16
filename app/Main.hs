@@ -1,19 +1,26 @@
 module Main where
 
-import Compiler (compile)
-import System.Environment (getArgs)
-import System.IO (hPutStrLn, stderr)
+import           Compiler (compile)
+import           System.Environment (getArgs)
+import           System.Exit (exitFailure)
+import           System.FilePath (dropExtension)
+import qualified System.IO as IO
 
 main :: IO ()
 main = do
   args <- getArgs
-  (path, src) <- case args of
+  (path, src, out) <- case args of
     [] -> do
-      src <- getContents
-      pure ("<stdin>", src)
+      src <- IO.getContents
+      pure ("<stdin>", src, IO.stdout)
     path : _ -> do
-      src <- readFile path
-      pure (path, src)
+      src <- IO.readFile path
+      out <- IO.openFile (dropExtension path) IO.WriteMode
+      pure (path, src, out)
   case compile path src of
-    Left err  -> hPutStrLn stderr $ show err
-    Right bin -> putStr bin
+    Left err  -> do
+      IO.hPutStrLn IO.stderr $ show err
+      exitFailure
+    Right bin -> do
+      IO.hPutStr out bin
+      IO.hClose out

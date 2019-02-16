@@ -5,8 +5,7 @@ description: Please see README.md
 author: Daniel Zhu <danzhu24@hotmail.com>
 maintainer: Daniel Zhu <danzhu24@hotmail.com>
 
-extra-source-files:
-  - README.md
+extra-source-files: []
 
 dependencies:
   - base >= 4.7 && < 5
@@ -32,3 +31,4 @@ executables:
       - app
     dependencies:
       - fin
+      - filepath

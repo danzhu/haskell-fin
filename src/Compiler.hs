@@ -45,6 +45,4 @@ compile path src = do
   ast <- left ParserError $ parseAst path src
   typed <- left (TypeError state) $ typeAst ast
   traceShowM typed
-  let asm = codeGen typed
-  traceM asm
-  pure asm
+  pure $ codeGen typed

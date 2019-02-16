@@ -7,6 +7,6 @@ def fib n = n .if (n .lt 2) id {
 println (twice add1 2)
 println {
     let n = 10
-    fib n
+    id fib n
 }
 println "hello world"

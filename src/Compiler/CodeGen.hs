@@ -110,10 +110,11 @@ scope g = paren (tell "()=>{" *> g <* tell "}") <* paren (pure ())
 
 genAst :: Ast -> Generator ()
 genAst (Ast expr) = do
+  tell "#!/usr/bin/env node\n"
   tell lib
   tell "console.log("
   gen expr
-  tell ")"
+  tell ")\n"
 
 
 codeGen :: Ast -> String

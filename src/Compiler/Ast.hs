@@ -15,7 +15,7 @@ module Compiler.Ast
 
 import           Compiler.Data
 import           Compiler.Type
-import           Control.Monad.RWS (RWS, ask, evalRWS, local, tell)
+import qualified Control.Monad.RWS as RWS
 import           Data.Foldable (for_)
 import           Data.Traversable (for)
 
@@ -71,26 +71,27 @@ preOrder fExpr fPat (Ast expr) = Ast <$> pre expr
           pure $ n'{ nKind = kind' }
 
 
-type Displayer = RWS Int String ()
+-- indent, output, ()
+type Displayer = RWS.RWS Int String ()
 
 recur :: (Display d) => d -> Displayer ()
-recur d = local (+ 1) $ do
-  ind <- ask
-  tell $ replicate (ind * 2) ' '
+recur d = RWS.local (+ 1) $ do
+  ind <- RWS.ask
+  RWS.tell $ replicate (ind * 2) ' '
   disp d
 
 title :: String -> Displayer ()
-title s = tell $ s ++ "\n"
+title s = RWS.tell $ s ++ "\n"
 
 display :: (Display d) => d -> String
-display d = snd $ evalRWS (disp d) 0 ()
+display d = snd $ RWS.evalRWS (disp d) 0 ()
 
 class Display a where
   disp :: a -> Displayer ()
 
 instance (Display a) => Display (Node a) where
   disp Node{ nType = tp, nKind = a } = do
-    tell $ show tp ++ ": "
+    RWS.tell $ show tp ++ ": "
     disp a
 
 instance Show Var where
