@@ -5,31 +5,172 @@ module Compiler.CodeGen
   ) where
 
 import           Compiler.Ast
-import           Control.Monad.RWS (RWS, evalRWS, get, put, tell)
-import           Data.FileEmbed
--- import qualified Data.Map as Map
--- import qualified Data.Set as Set
+import           Compiler.Lens
+import           Control.Monad.Except (throwError)
+import           Control.Monad.Identity (runIdentity)
+import qualified Control.Monad.RWS as RWS
+import qualified Control.Monad.Writer as Writer
+import           Data.FileEmbed (embedStringFile)
+import           Data.Foldable (sequenceA_)
+import qualified Data.List as List
+import           Data.Traversable (for)
+
+
+-- constants
+shebang :: String
+shebang = "#!/usr/bin/env node"
 
 lib :: String
 lib = $(embedStringFile "res/lib.js")
 
 
--- generator
-type Generator = RWS () String Int
+-- generator util
+type Generator = RWS.RWS () String Int
 
 class Gen a where
   gen :: a -> Generator ()
 
+write :: String -> Generator ()
+write = RWS.tell
+
+paren :: Generator a -> Generator a
+paren g = write "(" *> g <* write ")"
+
+brace :: Generator a -> Generator a
+brace g = write "{" *> g <* write "}"
+
+commaSep :: Gen a => [a] -> Generator ()
+commaSep = sequenceA_ . List.intersperse (write ",") . map gen
+
+fun :: [Var] -> Generator a -> Generator a
+fun vars g = paren $ paren (commaSep vars) *> write "=>" *> g
+
+scope :: Generator a -> Generator a
+scope g = paren (write "()=>" *> brace g) <* paren (pure ())
+
+tmpVar :: Generator Var
+tmpVar = do
+  i <- RWS.get
+  RWS.put $ i + 1
+  pure $ Var $ "_t" ++ show i
+
+constVar :: Var -> Generator a -> Generator a
+constVar var g = write "const " *> gen var *> write "=" *> g <* write ";"
+
+
+-- pattern matching
+data Match = Match Var MatchKind
+           deriving Show
+data MatchKind = MNew
+               | MLit Lit
+               deriving Show
+
+data Act = Act Var Pat
+         deriving Show
+
+data Arm' = Arm' Pat Var
+          deriving Show
+
+matchChildren :: Applicative f => (Match -> f Match) -> Match -> f Match
+matchChildren _ (Match var kind) = Match var <$> ch kind
+  where ch m@MLit{} = pure m
+        ch m@MNew   = pure m
+
+matchPreorder :: Monad m => (Match -> m Match) -> Match -> m Match
+matchPreorder = preorder matchChildren
+
+patVars :: Pat -> [Var]
+patVars Node{ nKind = kind } = case kind of
+  PVar v -> [v]
+  PLit{} -> []
+  PIgn   -> []
+
+matchPatVars :: Match -> Pat -> Writer.Writer [Var] ()
+matchPatVars (Match var _) Node{ nKind = pat } = case pat of
+  PLit{} -> pure ()
+  PVar{} -> Writer.tell [var]
+  PIgn   -> pure ()
+
+nextAct :: Match -> Pat -> Either Act ()
+nextAct _ Node{ nKind = PVar{} } = pure ()
+nextAct _ Node{ nKind = PIgn } = pure ()
+nextAct (Match var MNew) pat = throwError $ Act var pat
+nextAct (Match _ (MLit mLit)) Node{ nKind = PLit pLit }
+  | mLit == pLit = pure ()
+  | otherwise = error "incompatible match and pattern"
+
+replace :: Act -> Match -> Match
+replace (Act aVar Node{ nKind = pat }) = runIdentity . matchPreorder rep
+  where rep m@(Match mVar _)
+          | mVar == aVar = pure $ Match mVar mKind
+          | otherwise    = pure m
+        mKind = case pat of
+          PLit lit -> MLit lit
+          PVar{}   -> error "invalid replacement pattern"
+          PIgn     -> error "invalid replacement pattern"
+
+matchSuccCompat :: Match -> Arm' -> Bool
+matchSuccCompat (Match _ kind) (Arm' Node{ nKind = pat } _) = comp kind pat
+  where comp MNew _            = True
+        comp _ PVar{}          = True
+        comp _ PIgn            = True
+        comp (MLit m) (PLit p) = m == p
+
+matchFailCompat :: Match -> Arm' -> Bool
+matchFailCompat (Match _ kind) (Arm' Node{ nKind = pat } _) = comp kind pat
+  where comp MNew _            = True
+        comp _ PVar{}          = True
+        comp _ PIgn            = True
+        comp (MLit m) (PLit p) = m /= p
+
+genAct :: Act -> Generator () -> Generator () -> Generator ()
+genAct (Act var Node{ nKind = pat }) t f = case pat of
+  PLit lit -> do
+    write "if"
+    paren $ do
+      gen var
+      write "==="
+      gen lit
+    brace t
+    write "else"
+    brace f
+  PVar{} -> error "invalid act pattern"
+  PIgn   -> error "invalid act pattern"
+
+genMatch :: Var -> [Arm] -> Generator ()
+genMatch var arms = fun [var] $ brace $ do
+  arms' <- for arms $ \(Arm pat expr) -> do
+    fn <- tmpVar
+    constVar fn $ fun (patVars pat) $ gen expr
+    pure $ Arm' pat fn
+  match arms' $ Match var MNew
+  where match :: [Arm'] -> Match -> Generator ()
+        match [] _ = write "throw new Error('pattern fail');"
+        match arms'@(Arm' pat fn : _) mat = case nextAct mat pat of
+          Left act -> do
+            let mat' = replace act mat
+                ts = filter (matchSuccCompat mat') arms'
+                fs = filter (matchFailCompat mat') arms'
+            genAct act (match ts mat') (match fs mat)
+          Right () -> do
+            let vars = Writer.execWriter $ matchPatVars mat pat
+            write "return "
+            gen fn
+            paren $ commaSep vars
+            write ";"
+
+
+-- expr code generation
 instance Gen a => Gen (Node a) where
   gen Node{ nKind = a } = gen a
 
 instance Gen Var where
-  gen (Var v) = tell $ '_' : v
+  gen (Var v) = write $ '_' : v
 
 instance Gen Lit where
   gen kind = case kind of
-    LInt i -> tell $ show i
-    LStr s -> tell $ show s
+    LInt i -> write $ show i
+    LStr s -> write $ show s
 
 instance Gen ExprKind where
   gen kind = case kind of
@@ -40,82 +181,34 @@ instance Gen ExprKind where
       paren $ gen a
     EAbs arms -> do
       case arms of
-        [Arm Node{ nKind = PVar arg } expr] -> fun arg $ gen expr
+        [Arm Node{ nKind = PVar arg } expr] -> fun [arg] $ gen expr
         [Arm Node{ nKind = PIgn } expr] -> do
-            arg <- temp
-            fun arg $ gen expr
-        _ -> error "pattern matching not implemented"
+          arg <- tmpVar
+          fun [arg] $ gen expr
+        _ -> do
+          arg <- tmpVar
+          genMatch arg arms
     ESeq a b -> paren $ do
       gen a
-      tell ","
+      write ","
       gen b
     ELet var val expr -> do
-      fun var $ gen expr
+      fun [var] $ gen expr
       paren $ gen val
     EDef var val expr -> scope $ do
-      tell "const "
-      gen var
-      tell "="
-      gen val
-      tell ";return "
+      constVar var $ gen val
+      write "return "
       gen expr
 
 
--- pattern matching
--- data Match = MLit Lit
---            | MUnk
---            deriving (Ord, Eq)
-
--- type PatMatch = RWS () String (Map.Map (Set.Set Match) Int)
-
--- match :: Set.Set Match -> PatMatch Int
--- match m = do
---   st <- get
---   case Map.lookup m st of
---     Just i -> pure i
---     Nothing -> do
---       let i = Map.size st
---       update $ Map.insert m i
---       pure i
-
--- -- matchPat :: Pat -> PatMatch ()
--- -- matchPat (Node _ kind) = case kind of
--- --   PLit lit ->
-
--- -- matchArm :: Arm -> PatMatch ()
--- -- matchArm (Arm pat expr) = do
--- --   i <- match pat
-
--- genArms :: Var -> [Arm] -> Generator ()
--- genArms param (arm : arms) = do
---   genArms param arms
--- genArms _ [] = tell "(()=>{throw 'pattern fail'})()"
-
-
--- util
-temp :: Generator Var
-temp = do
-  i <- get
-  put $ i + 1
-  pure $ Var $ "_t" ++ show i
-
-paren :: Generator a -> Generator a
-paren g = tell "(" *> g <* tell ")"
-
-fun :: Var -> Generator a -> Generator a
-fun var g = paren $ gen var *> tell "=>" *> g
-
-scope :: Generator a -> Generator a
-scope g = paren (tell "()=>{" *> g <* tell "}") <* paren (pure ())
-
 genAst :: Ast -> Generator ()
 genAst (Ast expr) = do
-  tell "#!/usr/bin/env node\n"
-  tell lib
-  tell "console.log("
+  write shebang
+  write "\n"
+  write lib
+  write "const main = "
   gen expr
-  tell ")\n"
-
+  write ";\nconsole.log(main);"
 
 codeGen :: Ast -> String
-codeGen ast = snd $ evalRWS (genAst ast) () 0
+codeGen ast = snd $ RWS.evalRWS (genAst ast) () 0

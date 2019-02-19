@@ -9,7 +9,8 @@ module Compiler.Ast
   , ExprKind(..)
   , Ast(..)
   , mkNode
-  , preOrder
+  , prePat
+  , preAst
   , display
   ) where
 
@@ -25,6 +26,7 @@ newtype Var = Var String
 data Node a = Node { nType :: Type
                    , nPos  :: SrcPos
                    , nKind :: a }
+            deriving Show
 
 data Lit = LInt Int
          | LStr String
@@ -35,9 +37,10 @@ type Pat = Node PatKind
 data PatKind = PLit Lit
              | PVar Var
              | PIgn
-             deriving (Show)
+             deriving Show
 
 data Arm = Arm Pat Expr
+         deriving Show
 
 type Expr = Node ExprKind
 
@@ -48,6 +51,7 @@ data ExprKind = ELit Lit
               | ESeq Expr Expr
               | ELet Var Expr Expr
               | EDef Var Expr Expr
+              deriving Show
 
 newtype Ast = Ast Expr
 
@@ -55,19 +59,28 @@ newtype Ast = Ast Expr
 mkNode :: SrcPos -> a -> Node a
 mkNode = Node $ TVar $ TypeVar ""
 
-preOrder :: (Monad f) => (Expr -> f Expr) -> (Pat -> f Pat) -> Ast -> f Ast
-preOrder fExpr fPat (Ast expr) = Ast <$> pre expr
-  where preArm (Arm p e) = Arm <$> fPat p <*> pre e
-        pre n = do
+prePat :: Monad m => (t -> m Pat) -> t -> m Pat
+prePat f n = do
+  n'@Node{ nKind = kind } <- f n
+  kind' <- case kind of
+    PLit{} -> pure kind
+    PVar{} -> pure kind
+    PIgn{} -> pure kind
+  pure $ n'{ nKind = kind' }
+
+preAst :: (Monad f) => (Expr -> f Expr) -> (Pat -> f Pat) -> Ast -> f Ast
+preAst fExpr fPat (Ast expr) = Ast <$> preExpr expr
+  where preArm (Arm p e) = Arm <$> prePat fPat p <*> preExpr e
+        preExpr n = do
           n'@Node{ nKind = kind } <- fExpr n
           kind' <- case kind of
-                     ELit lit   -> pure $ ELit lit
-                     EVar var   -> pure $ EVar var
-                     EApp f a   -> EApp <$> pre f <*> pre a
+                     ELit{}     -> pure kind
+                     EVar{}     -> pure kind
+                     EApp f a   -> EApp <$> preExpr f <*> preExpr a
                      EAbs as    -> EAbs <$> for as preArm
-                     ESeq a b   -> ESeq <$> pre a <*> pre b
-                     ELet v a b -> ELet v <$> pre a <*> pre b
-                     EDef v a b -> EDef v <$> pre a <*> pre b
+                     ESeq a b   -> ESeq <$> preExpr a <*> preExpr b
+                     ELet v a b -> ELet v <$> preExpr a <*> preExpr b
+                     EDef v a b -> EDef v <$> preExpr a <*> preExpr b
           pure $ n'{ nKind = kind' }
 
 

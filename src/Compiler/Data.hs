@@ -3,3 +3,4 @@ module Compiler.Data
   ) where
 
 newtype SrcPos = SrcPos Int
+               deriving Show

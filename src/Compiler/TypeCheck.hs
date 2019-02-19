@@ -11,7 +11,6 @@ import           Compiler.Ast
 import           Compiler.Data
 import           Compiler.Type
 import           Control.Arrow (first)
-import           Control.Monad (foldM)
 import           Control.Monad.Except (throwError)
 import qualified Control.Monad.RWS as RWS
 import           Data.Functor.Identity (runIdentity)
@@ -42,10 +41,10 @@ newtype Subst = Subst (Map.Map TypeVar Type)
               deriving (Show)
 
 instance Semigroup Subst where
-  Subst a <> subs@(Subst b) = Subst $ b `Map.union` Map.map (subst subs) a
+  Subst a <> subs@(Subst b) = Subst $ b <> Map.map (subst subs) a
 
 instance Monoid Subst where
-  mempty = Subst Map.empty
+  mempty = Subst mempty
 
 class Substitutable a where
   subst :: Subst -> a -> a
@@ -60,7 +59,7 @@ instance Substitutable Constraint where
   subst subs (Constraint pos a b) = Constraint pos (subst subs a) (subst subs b)
 
 instance Substitutable Ast where
-  subst subs = runIdentity . preOrder sub sub
+  subst subs = runIdentity . preAst sub sub
     where sub n@Node{ nType = tp } = pure n{ nType = subst subs tp }
 
 instance (Substitutable a) => Substitutable [a] where
@@ -79,22 +78,24 @@ usedVars = RWS.gets fst
 withVar :: Var -> Scheme -> Infer a -> Infer a
 withVar var scm = RWS.local $ Map.insert var scm
 
-withVars :: [(Var, Scheme)] -> Infer a -> Infer a
-withVars vars = RWS.local $ Map.union $ Map.fromList vars
+withVars :: Map.Map Var Scheme -> Infer a -> Infer a
+withVars = RWS.local . (<>)
 
 freeVars :: Type -> Set.Set TypeVar
 freeVars tp = case tp of
-  TNat{}   -> Set.empty
+  TNat{}   -> mempty
   TVar var -> Set.singleton var
   TFun p r -> freeVars p <> freeVars r
 
 occurs :: TypeVar -> Type -> Bool
 occurs tv a = tv `Set.member` freeVars a
 
+mono :: Type -> Scheme
+mono = Forall [] mempty
+
 instantiate :: Scheme -> Infer Type
 instantiate (Forall cns tvs tp) = do
-  let fold ss tv = (\var -> Map.insert tv var ss) <$> freshVar
-  subs <- Subst <$> foldM fold Map.empty tvs
+  subs <- Subst <$> sequenceA (Map.fromSet (const freshVar) tvs)
   RWS.tell $ subst subs cns
   pure $ subst subs tp
 
@@ -107,11 +108,11 @@ generalize inf = do
       scm = Forall cns tvs tp
   pure (a, scm)
 
-patVars :: Pat -> [(Var, Type)]
+patVars :: Pat -> Map.Map Var Type
 patVars Node{ nType = tp, nKind = kind } = case kind of
-  PLit{} -> []
-  PVar v -> [(v, tp)]
-  PIgn   -> []
+  PLit{} -> mempty
+  PVar v -> Map.singleton v tp
+  PIgn   -> mempty
 
 class Typeable a where
   constraint :: a -> Infer a
@@ -145,7 +146,7 @@ instance Typeable Expr where
         tRet <- freshVar
         arms' <- for arms $ \(Arm pat expr) -> do
           pat'@Node{ nType = tPat } <- constraint pat
-          let vars = map (uncurry toScm) $ patVars pat'
+          let vars = mono <$> patVars pat'
           expr'@Node{ nType = tExpr } <- withVars vars $ constraint expr
           RWS.tell [ Constraint pos tArg tPat
                    , Constraint pos tRet tExpr ]
@@ -162,14 +163,13 @@ instance Typeable Expr where
       EDef var val expr -> do
         (val', scm) <- generalize $ do
           tp <- freshVar
-          let scm = Forall [] Set.empty tp
+          let scm = mono tp
           val'@Node{ nType = tVal } <- withVar var scm $ constraint val
           RWS.tell [ Constraint pos tp tVal ]
           pure val'
         expr'@Node { nType = tExpr } <- withVar var scm $ constraint expr
         pure (tExpr, EDef var val' expr')
     pure $ node{ nType = tp, nKind = kind' }
-    where toScm v tp = (v, Forall [] Set.empty tp)
 
 instance Typeable Ast where
   constraint (Ast expr) = Ast <$> constraint expr
@@ -207,7 +207,6 @@ context = Map.fromList $ map (first Var) ctx
               , ("lt", mono $ fun [int, int] bool)
               , ("if", poly ["a"] $ fun [bool, a, a] a)
               , ("println", poly ["a"] $ fun [a] nil)]
-        mono = Forall [] Set.empty
         poly = Forall [] . Set.fromList . map TypeVar
         fun = flip $ foldr TFun
         a = TVar $ TypeVar "a"
